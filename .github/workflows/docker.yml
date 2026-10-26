@@ -37,12 +37,23 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
-      # pull requests only check that the image builds
-      - uses: docker/build-push-action@v7
+      # runs tests/smoke.py inside the image, once per platform
+      - name: Test
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: test
+          platforms: ${{ env.PLATFORMS }}
+          cache-from: type=gha
+
+      # pull requests stop after the tests
+      - name: Push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ env.PLATFORMS }}
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

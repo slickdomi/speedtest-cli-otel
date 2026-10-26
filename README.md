@@ -34,3 +34,10 @@ SPEEDTEST_EXCLUDE 1234
 For other OTEL env variables refer to https://opentelemetry.io/docs/languages/sdk-configuration/otlp-exporter/
 
 Docker container available at https://hub.docker.com/r/slickdomi/speedtest-cli-otel
+
+## Development
+
+Dependencies are pinned in `requirements.txt` and bumped by Dependabot. `tests/smoke.py` runs the service inside the image against a fake speedtest-cli and a fake OpenTelemetry collector, and CI runs it for every platform before pushing. To run it locally:
+```
+docker build --target test .
+```

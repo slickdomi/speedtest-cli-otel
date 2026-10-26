@@ -1,8 +1,7 @@
-FROM alpine:3.21
+FROM alpine:3.24 AS base
 
 RUN mkdir /code
 WORKDIR /code
-COPY src/* /code/
 
 ENV every_seconds_from 1500
 ENV every_seconds_to 2100
@@ -16,5 +15,14 @@ ENV OTEL_EXPORTER_OTLP_TIMEOUT 15
 
 RUN apk update
 RUN apk add --no-cache speedtest-cli bash py3-pip
-RUN pip install --break-system-packages schedule opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
+COPY requirements.txt /code/
+RUN pip install --break-system-packages -r /code/requirements.txt
+COPY src/* /code/
 ENTRYPOINT ["python", "/code/speedtest.py"]
+
+# docker build --target test . runs the smoke tests inside the image
+FROM base AS test
+COPY tests/ /tests/
+RUN python /tests/smoke.py
+
+FROM base
