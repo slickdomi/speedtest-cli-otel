@@ -3,14 +3,26 @@ import json
 import schedule
 import time
 import datetime
+import subprocess
 
 from otel import send_logs, send_error
+
+def build_command():
+    cmd = ["speedtest-cli", "--secure", "--json"]
+    # Comma-separated server ids, e.g. "62493" or "62493,12627"
+    for server_id in (os.environ.get("SPEEDTEST_SERVER") or "").split(","):
+        if server_id.strip():
+            cmd += ["--server", server_id.strip()]
+    for server_id in (os.environ.get("SPEEDTEST_EXCLUDE") or "").split(","):
+        if server_id.strip():
+            cmd += ["--exclude", server_id.strip()]
+    return cmd
 
 def run_speedtest():
     print("Running speedtest ", datetime.datetime.now().isoformat())
     speedtest_result = ""
     try:
-        speedtest_result = os.popen("speedtest-cli --secure --json").read()
+        speedtest_result = subprocess.run(build_command(), capture_output=True, text=True, timeout=300).stdout
     except Exception as e:
         send_error("Error running speedtest-cli", e)
         print("Fail sending running speedtest-cli")
