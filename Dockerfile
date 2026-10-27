@@ -1,4 +1,10 @@
 FROM alpine:3.24 AS base
+ARG TARGETARCH
+ARG TARGETVARIANT
+
+# Ookla's speedtest can't be part of the image, src/ookla.py downloads the
+# build for this platform when the user accepts its license
+ENV SPEEDTEST_PLATFORM=$TARGETARCH$TARGETVARIANT
 
 RUN mkdir /code
 WORKDIR /code
