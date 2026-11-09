@@ -19,6 +19,10 @@ VERSION = "1.2.0"
 BINARY = "/opt/ookla/speedtest"
 LICENSE_FLAGS = ["--accept-license", "--accept-gdpr"]
 COMMAND = [BINARY, *LICENSE_FLAGS, "--format=json"]
+# the last line of each license notice it prints on stderr
+LICENSE_ACCEPTED = "License acceptance recorded. Continuing."
+# what it exits with when Ookla turns it away with "Limit reached: Too many requests received"
+RATE_LIMITED = 173
 
 # Docker platform (SPEEDTEST_PLATFORM from the Dockerfile) -> Ookla's build of
 # the CLI and the sha256 of its tarball
@@ -68,19 +72,26 @@ def error_message(speedtest):
             continue
         if isinstance(entry, dict) and entry.get("level") == "error":
             messages.append(entry.get("message", line))
-    return "; ".join(messages) or f"no output, exit code {speedtest.returncode}"
+    if messages:
+        return "; ".join(messages)
+    # some errors are plain text only, like rate limiting's
+    # "[2026-11-09 17:26:25.156] [error] Limit reached:\n\nToo many requests received. ..."
+    # stdout is left out, as a result there would include IP and MAC addresses
+    output = " ".join(speedtest.stderr.rpartition(LICENSE_ACCEPTED)[2].split())
+    return output or f"no output, exit code {speedtest.returncode}"
 
 
-def pick_servers(pinned, excluded):
+def pick_servers(pinned, excluded, rotate=False):
     """Server ids to try in order, None lets speedtest pick the best one itself.
 
     The CLI takes a single server and can't exclude any, so pinned servers are
     tried one after the other, and excluding means using the closest server
-    left from its list.
+    left from its list. To rotate, nearby servers are listed even when none
+    are excluded.
     """
     if pinned:
         return [server for server in pinned if server not in excluded]
-    if not excluded:
+    if not excluded and not rotate:
         return [None]
     listing = subprocess.run(COMMAND + ["--servers"], capture_output=True, text=True, timeout=60)
     if listing.returncode != 0:

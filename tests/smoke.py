@@ -339,6 +339,71 @@ def test_ookla_failure_is_exported():
     )
 
 
+def test_ookla_pinned_servers_rotate():
+    # runs every second; 63249 fails, so the second run falls back on the server after it
+    got, calls, log = run_speedtest(
+        {
+            "63249": respond(stderr=ookla_error("Cannot read from socket"), exit_code=2),
+            "*": respond(json.dumps(OOKLA_RESULT)),
+        },
+        3,
+        SPEEDTEST_ACCEPT_OOKLA_LICENSE="true",
+        SPEEDTEST_ROTATE="true",
+        SPEEDTEST_SERVER="59333, 63249, 54889",
+        every_seconds_from="1",
+        every_seconds_to="1",
+    )
+    # more runs may follow while the test waits for stray records
+    expect(
+        calls[:4] == [OOKLA + ["--server-id=59333"], OOKLA + ["--server-id=63249"],
+                      OOKLA + ["--server-id=54889"], OOKLA + ["--server-id=54889"]],
+        f"expected each run to start one server further, got calls {calls}",
+        log,
+    )
+    expect(len(got) >= 3 and all(severity == "INFO" for _, severity, _ in got), f"unexpected records: {got}", log)
+
+
+def test_ookla_nearby_servers_rotate():
+    got, calls, log = run_speedtest(
+        {"*": respond(json.dumps(OOKLA_RESULT))},
+        2,
+        servers=OOKLA_SERVERS,
+        SPEEDTEST_ACCEPT_OOKLA_LICENSE="true",
+        SPEEDTEST_ROTATE="true",
+        every_seconds_from="1",
+        every_seconds_to="1",
+    )
+    expect(
+        calls[:4] == [OOKLA + ["--servers"], OOKLA + ["--server-id=63249"],
+                      OOKLA + ["--servers"], OOKLA + ["--server-id=54889"]],
+        f"expected runs to rotate through the nearby servers, got calls {calls}",
+        log,
+    )
+    expect(len(got) >= 2 and all(severity == "INFO" for _, severity, _ in got), f"unexpected records: {got}", log)
+
+
+def test_ookla_rate_limit_stops_trying():
+    # what Ookla's speedtest 1.2.0 prints when it's run too often, as plain text only
+    limit_reached = (
+        "[2026-11-09 17:26:25.156] [error] Limit reached:\n\n"
+        "Too many requests received. You may run the Speedtest CLI on a single computer for personal, "
+        "non-commercial use only. For commercial licensing, visit https://www.ookla.com/speedtest-embedded.\n"
+    )
+    got, calls, log = run_speedtest(
+        {"*": respond(stderr=OOKLA_LICENSE_NOTICE + limit_reached, exit_code=ookla.RATE_LIMITED)},
+        1,
+        SPEEDTEST_ACCEPT_OOKLA_LICENSE="true",
+        SPEEDTEST_SERVER="59333, 63249",
+    )
+    expect(calls == [OOKLA + ["--server-id=59333"]], f"expected no more tries once rate limited, got calls {calls}", log)
+    bodies = [(severity, body) for _, severity, body in got]
+    expect(
+        bodies == [("ERROR", "speedtest failed: server 59333: " + " ".join(limit_reached.split()))],
+        f"expected one error with speedtest's message, got {bodies}",
+        log,
+    )
+
+
 def test_ookla_install():
     platform = os.environ.get("SPEEDTEST_PLATFORM")
     expect(platform in ookla.BUILDS, f"no build of Ookla's speedtest for platform {platform!r}")
@@ -378,6 +443,9 @@ if __name__ == "__main__":
         test_ookla_result_is_converted,
         test_ookla_excluded_servers_are_skipped,
         test_ookla_failure_is_exported,
+        test_ookla_pinned_servers_rotate,
+        test_ookla_nearby_servers_rotate,
+        test_ookla_rate_limit_stops_trying,
         test_ookla_install,
     ):
         test()

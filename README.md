@@ -55,7 +55,12 @@ SPEEDTEST_ACCEPT_OOKLA_LICENSE true
 
 **By setting this you accept Ookla's [End User License Agreement](https://www.speedtest.net/about/eula), [Terms of Use](https://www.speedtest.net/about/terms) and [Privacy Policy](https://www.speedtest.net/about/privacy).** Among other things, the license only allows personal, non-commercial use on a personal computer you own or control, and not on routers, modems or other non-personal devices. Ookla collects data that may identify you, such as your IP address, device identifiers and location, and may share it with internet providers, hardware manufacturers and regulators. Ookla also publishes every result on speedtest.net; the service sends its link as `share`.
 
-Ookla's CLI only takes a single server, so pinned servers are tried in order and the first one that works is used, and with `SPEEDTEST_EXCLUDE` the closest server that isn't excluded is used. List nearby servers with:
+Ookla's CLI only takes a single server, so pinned servers are tried in order and the first one that works is used, and with `SPEEDTEST_EXCLUDE` the closest server that isn't excluded is used. When Ookla turns the CLI away with `Limit reached: Too many requests received`, that's reported as the error and no other server is tried until the next run.
+
+To spread the tests over several servers instead of always using the same one, turn on rotation. Each run then starts one server further down the pinned servers, or down the nearby ones that aren't excluded when none are pinned, and falls back on the ones after it. Pin a few servers to choose which ones it rotates through. Rotation only works with Ookla's CLI.
+```
+SPEEDTEST_ROTATE true
+``` List nearby servers with:
 ```
 docker run --rm -e SPEEDTEST_ACCEPT_OOKLA_LICENSE=true --entrypoint python slickdomi/speedtest-cli-otel:latest /code/ookla.py --servers
 ```

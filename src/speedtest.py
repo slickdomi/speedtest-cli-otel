@@ -1,5 +1,6 @@
 import os
 import json
+import itertools
 import schedule
 import time
 import datetime
@@ -53,15 +54,23 @@ def run_speedtest_cli():
         return None
     return result
 
+# counts runs that rotate servers with SPEEDTEST_ROTATE
+rotations = itertools.count()
+
 def run_ookla():
     """Returns Ookla's result in speedtest-cli's format, or None after reporting why there isn't one."""
+    rotate = (os.environ.get("SPEEDTEST_ROTATE") or "").lower() == "true"
     try:
         ookla.install()
-        servers = ookla.pick_servers(server_ids("SPEEDTEST_SERVER"), server_ids("SPEEDTEST_EXCLUDE"))
+        servers = ookla.pick_servers(server_ids("SPEEDTEST_SERVER"), server_ids("SPEEDTEST_EXCLUDE"), rotate)
     except Exception as e:
         send_error("Error setting up Ookla's speedtest", e)
         print("Fail setting up Ookla's speedtest")
         return None
+    if rotate and servers:
+        # each run starts one server further, and falls back on the ones after it
+        start = next(rotations) % len(servers)
+        servers = servers[start:] + servers[:start]
 
     failures = []
     for server in servers:
@@ -74,6 +83,9 @@ def run_ookla():
             return ookla.to_speedtest_cli_format(json.loads(speedtest.stdout))
         reason = ookla.error_message(speedtest)
         failures.append(f"server {server}: {reason}" if server else reason)
+        if speedtest.returncode == ookla.RATE_LIMITED:
+            # the other servers would be turned away too, and each try counts against the limit
+            break
 
     reason = "; ".join(failures) or "every server is excluded"
     send_error("speedtest failed", reason)
