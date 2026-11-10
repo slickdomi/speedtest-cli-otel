@@ -83,8 +83,17 @@ def respond(stdout="", stderr="", exit_code=0):
     return {"stdout": stdout, "stderr": stderr, "exit": exit_code}
 
 
+# what Ookla's speedtest 1.2.0 prints when it's run too often, as plain text only
+LIMIT_REACHED = (
+    "[2026-11-09 17:26:25.156] [error] Limit reached:\n\n"
+    "Too many requests received. You may run the Speedtest CLI on a single computer for personal, "
+    "non-commercial use only. For commercial licensing, visit https://www.ookla.com/speedtest-embedded.\n"
+)
+
+
 # stands in for both speedtest-cli and Ookla's speedtest: records how it was
-# called and answers as FAKE_SPEC says for the server it was asked for
+# called and answers as FAKE_SPEC says for the server it was asked for, or for
+# "--servers" when it lists them
 FAKE_SPEEDTEST = r"""#!/usr/bin/env python3
 import json, os, sys
 with open(os.environ["FAKE_CALLS"], "a") as f:
@@ -92,9 +101,9 @@ with open(os.environ["FAKE_CALLS"], "a") as f:
 with open(os.environ["FAKE_SPEC"]) as f:
     spec = json.load(f)
 if "--servers" in sys.argv:
-    print(json.dumps({"type": "serverList", "servers": spec["servers"]}))
-    sys.exit(0)
-server = next((arg.split("=", 1)[1] for arg in sys.argv if arg.startswith("--server-id=")), "*")
+    server = "--servers"
+else:
+    server = next((arg.split("=", 1)[1] for arg in sys.argv if arg.startswith("--server-id=")), "*")
 response = spec["responses"].get(server) or spec["responses"]["*"]
 sys.stdout.write(response["stdout"])
 sys.stderr.write(response["stderr"])
@@ -142,13 +151,17 @@ def write_executable(path, content):
     os.chmod(path, 0o755)
 
 
-def run_speedtest(responses, expected_records, servers=(), **env):
+def run_speedtest(responses, expected_records, servers=(), settle=1, **env):
     """Runs speedtest.py until it has exported expected_records log records.
 
-    responses maps a server id, or "*" for any other, to what the fakes print
-    and exit with; servers is what Ookla's fake lists. Returns the records, the
-    commands the fakes were called with and speedtest.py's output.
+    responses maps a server id, "--servers" or "*" for any other to what the
+    fakes print and exit with; servers is what Ookla's fake lists unless
+    "--servers" says otherwise; settle is how many seconds to keep it running
+    after that. Returns the records, the commands the fakes were called with
+    and speedtest.py's output.
     """
+    listing = respond(json.dumps({"type": "serverList", "servers": list(servers)}))
+    responses = {"--servers": listing, **responses}
     records.clear()
     with tempfile.TemporaryDirectory() as tmp:
         write_executable(os.path.join(tmp, "speedtest-cli"), FAKE_SPEEDTEST)
@@ -156,7 +169,7 @@ def run_speedtest(responses, expected_records, servers=(), **env):
         os.makedirs(os.path.dirname(ookla.BINARY), exist_ok=True)
         write_executable(ookla.BINARY, FAKE_SPEEDTEST)
         with open(os.path.join(tmp, "spec"), "w") as f:
-            json.dump({"responses": responses, "servers": list(servers)}, f)
+            json.dump({"responses": responses}, f)
 
         try:
             with open(os.path.join(tmp, "output"), "w+") as output:
@@ -181,7 +194,7 @@ def run_speedtest(responses, expected_records, servers=(), **env):
                 while len(records) < expected_records and time.monotonic() < deadline and proc.poll() is None:
                     time.sleep(0.1)
                 # give anything unexpected a chance to arrive too
-                time.sleep(1)
+                time.sleep(settle)
                 proc.terminate()
                 proc.wait()
                 output.seek(0)
@@ -325,10 +338,12 @@ def test_ookla_excluded_servers_are_skipped():
 
 
 def test_ookla_failure_is_exported():
+    # without rotation, Ookla's speedtest picks the server itself
     got, calls, log = run_speedtest(
         {"*": respond(stderr=ookla_error("Configuration - No servers defined (NoServersException)"), exit_code=2)},
         1,
         SPEEDTEST_ACCEPT_OOKLA_LICENSE="true",
+        SPEEDTEST_ROTATE="false",
     )
     expect(calls == [OOKLA], f"unexpected speedtest calls: {calls}", log)
     bodies = [(severity, body) for _, severity, body in got]
@@ -348,7 +363,6 @@ def test_ookla_pinned_servers_rotate():
         },
         3,
         SPEEDTEST_ACCEPT_OOKLA_LICENSE="true",
-        SPEEDTEST_ROTATE="true",
         SPEEDTEST_SERVER="59333, 63249, 54889",
         every_seconds_from="1",
         every_seconds_to="1",
@@ -364,41 +378,63 @@ def test_ookla_pinned_servers_rotate():
 
 
 def test_ookla_nearby_servers_rotate():
+    # rotation is on by default, and only the first run lists the nearby servers
     got, calls, log = run_speedtest(
         {"*": respond(json.dumps(OOKLA_RESULT))},
-        2,
+        3,
         servers=OOKLA_SERVERS,
         SPEEDTEST_ACCEPT_OOKLA_LICENSE="true",
-        SPEEDTEST_ROTATE="true",
         every_seconds_from="1",
         every_seconds_to="1",
     )
     expect(
         calls[:4] == [OOKLA + ["--servers"], OOKLA + ["--server-id=63249"],
-                      OOKLA + ["--servers"], OOKLA + ["--server-id=54889"]],
+                      OOKLA + ["--server-id=54889"], OOKLA + ["--server-id=45280"]],
         f"expected runs to rotate through the nearby servers, got calls {calls}",
         log,
     )
-    expect(len(got) >= 2 and all(severity == "INFO" for _, severity, _ in got), f"unexpected records: {got}", log)
+    expect(len(got) >= 3 and all(severity == "INFO" for _, severity, _ in got), f"unexpected records: {got}", log)
 
 
-def test_ookla_rate_limit_stops_trying():
-    # what Ookla's speedtest 1.2.0 prints when it's run too often, as plain text only
-    limit_reached = (
-        "[2026-11-09 17:26:25.156] [error] Limit reached:\n\n"
-        "Too many requests received. You may run the Speedtest CLI on a single computer for personal, "
-        "non-commercial use only. For commercial licensing, visit https://www.ookla.com/speedtest-embedded.\n"
-    )
+def test_ookla_rate_limit_pauses():
+    # runs every second, long enough for the scheduler to try again at least once
     got, calls, log = run_speedtest(
-        {"*": respond(stderr=OOKLA_LICENSE_NOTICE + limit_reached, exit_code=ookla.RATE_LIMITED)},
+        {"*": respond(stderr=OOKLA_LICENSE_NOTICE + LIMIT_REACHED, exit_code=ookla.RATE_LIMITED)},
         1,
+        settle=3,
         SPEEDTEST_ACCEPT_OOKLA_LICENSE="true",
         SPEEDTEST_SERVER="59333, 63249",
+        every_seconds_from="1",
+        every_seconds_to="1",
     )
     expect(calls == [OOKLA + ["--server-id=59333"]], f"expected no more tries once rate limited, got calls {calls}", log)
+    expect("Skipping, Ookla rate limited" in log, "expected the next runs to be skipped", log)
     bodies = [(severity, body) for _, severity, body in got]
     expect(
-        bodies == [("ERROR", "speedtest failed: server 59333: " + " ".join(limit_reached.split()))],
+        bodies == [("ERROR", "speedtest failed: server 59333: " + " ".join(LIMIT_REACHED.split())
+                    + f"; pausing for {ookla.RATE_LIMIT_PAUSE // 60} minutes")],
+        f"expected one error with speedtest's message, got {bodies}",
+        log,
+    )
+
+
+def test_ookla_rate_limited_listing_pauses():
+    # Ookla can turn listing the nearby servers away too
+    got, calls, log = run_speedtest(
+        {"--servers": respond(stderr=OOKLA_LICENSE_NOTICE + LIMIT_REACHED, exit_code=ookla.RATE_LIMITED),
+         "*": respond(json.dumps(OOKLA_RESULT))},
+        1,
+        settle=3,
+        SPEEDTEST_ACCEPT_OOKLA_LICENSE="true",
+        every_seconds_from="1",
+        every_seconds_to="1",
+    )
+    expect(calls == [OOKLA + ["--servers"]], f"expected no more tries once rate limited, got calls {calls}", log)
+    expect("Skipping, Ookla rate limited" in log, "expected the next runs to be skipped", log)
+    bodies = [(severity, body) for _, severity, body in got]
+    expect(
+        bodies == [("ERROR", "Error setting up Ookla's speedtest: " + " ".join(LIMIT_REACHED.split())
+                    + f"; pausing for {ookla.RATE_LIMIT_PAUSE // 60} minutes")],
         f"expected one error with speedtest's message, got {bodies}",
         log,
     )
@@ -445,7 +481,8 @@ if __name__ == "__main__":
         test_ookla_failure_is_exported,
         test_ookla_pinned_servers_rotate,
         test_ookla_nearby_servers_rotate,
-        test_ookla_rate_limit_stops_trying,
+        test_ookla_rate_limit_pauses,
+        test_ookla_rate_limited_listing_pauses,
         test_ookla_install,
     ):
         test()

@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import tarfile
+import time
 import urllib.request
 
 VERSION = "1.2.0"
@@ -23,6 +24,13 @@ COMMAND = [BINARY, *LICENSE_FLAGS, "--format=json"]
 LICENSE_ACCEPTED = "License acceptance recorded. Continuing."
 # what it exits with when Ookla turns it away with "Limit reached: Too many requests received"
 RATE_LIMITED = 173
+# how long to stop testing after that; Ookla doesn't say, but people report the
+# limit lifting after about 1.5 hours without tests, and trying sooner seems to
+# make it last longer
+RATE_LIMIT_PAUSE = 2 * 60 * 60
+# how long to reuse the list of nearby servers; they barely change, and Ookla
+# rate limits listing them too
+SERVERS_LISTED_FOR = 24 * 60 * 60
 
 # Docker platform (SPEEDTEST_PLATFORM from the Dockerfile) -> Ookla's build of
 # the CLI and the sha256 of its tarball
@@ -31,6 +39,10 @@ BUILDS = {
     "arm64": ("aarch64", "3953d231da3783e2bf8904b6dd72767c5c6e533e163d3742fd0437affa431bd3"),
     "armv7": ("armhf", "e45fcdebbd8a185553535533dd032d6b10bc8c64eee4139b1147b9c09835d08d"),
 }
+
+
+class RateLimited(RuntimeError):
+    """Ookla turned the CLI away with "Limit reached: Too many requests received"."""
 
 
 def accepted():
@@ -81,6 +93,23 @@ def error_message(speedtest):
     return output or f"no output, exit code {speedtest.returncode}"
 
 
+# (time.monotonic() when listed, server ids) from the last listing
+listed = None
+
+
+def nearby_servers():
+    """Ids of the servers closest to furthest, listed again once SERVERS_LISTED_FOR is up."""
+    global listed
+    if listed is None or time.monotonic() - listed[0] > SERVERS_LISTED_FOR:
+        listing = subprocess.run(COMMAND + ["--servers"], capture_output=True, text=True, timeout=60)
+        if listing.returncode == RATE_LIMITED:
+            raise RateLimited(error_message(listing))
+        if listing.returncode != 0:
+            raise RuntimeError(error_message(listing))
+        listed = (time.monotonic(), [str(server["id"]) for server in json.loads(listing.stdout)["servers"]])
+    return listed[1]
+
+
 def pick_servers(pinned, excluded, rotate=False):
     """Server ids to try in order, None lets speedtest pick the best one itself.
 
@@ -93,11 +122,7 @@ def pick_servers(pinned, excluded, rotate=False):
         return [server for server in pinned if server not in excluded]
     if not excluded and not rotate:
         return [None]
-    listing = subprocess.run(COMMAND + ["--servers"], capture_output=True, text=True, timeout=60)
-    if listing.returncode != 0:
-        raise RuntimeError(error_message(listing))
-    nearby = [str(server["id"]) for server in json.loads(listing.stdout)["servers"]]
-    return [server for server in nearby if server not in excluded]
+    return [server for server in nearby_servers() if server not in excluded]
 
 
 def run(server=None):

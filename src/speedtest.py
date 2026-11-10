@@ -56,13 +56,29 @@ def run_speedtest_cli():
 
 # counts runs that rotate servers with SPEEDTEST_ROTATE
 rotations = itertools.count()
+# time.monotonic() until which runs are skipped, after Ookla rate limited one
+paused_until = 0
+
+def pause():
+    """Skips the runs during the next RATE_LIMIT_PAUSE, returns that for the error."""
+    global paused_until
+    paused_until = time.monotonic() + ookla.RATE_LIMIT_PAUSE
+    return f"pausing for {ookla.RATE_LIMIT_PAUSE // 60} minutes"
 
 def run_ookla():
     """Returns Ookla's result in speedtest-cli's format, or None after reporting why there isn't one."""
-    rotate = (os.environ.get("SPEEDTEST_ROTATE") or "").lower() == "true"
+    if time.monotonic() < paused_until:
+        print("Skipping, Ookla rate limited the speedtest less than", ookla.RATE_LIMIT_PAUSE // 60, "minutes ago")
+        return None
+    # on unless turned off, so the results don't all come from the same server
+    rotate = (os.environ.get("SPEEDTEST_ROTATE") or "true").lower() != "false"
     try:
         ookla.install()
         servers = ookla.pick_servers(server_ids("SPEEDTEST_SERVER"), server_ids("SPEEDTEST_EXCLUDE"), rotate)
+    except ookla.RateLimited as e:
+        send_error("Error setting up Ookla's speedtest", f"{e}; {pause()}")
+        print("Ookla rate limited listing servers")
+        return None
     except Exception as e:
         send_error("Error setting up Ookla's speedtest", e)
         print("Fail setting up Ookla's speedtest")
@@ -85,6 +101,7 @@ def run_ookla():
         failures.append(f"server {server}: {reason}" if server else reason)
         if speedtest.returncode == ookla.RATE_LIMITED:
             # the other servers would be turned away too, and each try counts against the limit
+            failures.append(pause())
             break
 
     reason = "; ".join(failures) or "every server is excluded"
@@ -105,8 +122,8 @@ def run_speedtest():
         return
     print("Success")
 
-every_seconds_from = int(os.environ.get("every_seconds_from") or 1500)
-every_seconds_to = int(os.environ.get("every_seconds_to") or 2100)
+every_seconds_from = int(os.environ.get("every_seconds_from") or 3300)
+every_seconds_to = int(os.environ.get("every_seconds_to") or 3900)
 schedule.every(every_seconds_from).to(every_seconds_to).seconds.do(run_speedtest)
 
 print("Starting speedtest every", every_seconds_from, "to", every_seconds_to, "seconds")

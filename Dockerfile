@@ -9,8 +9,8 @@ ENV SPEEDTEST_PLATFORM=$TARGETARCH$TARGETVARIANT
 RUN mkdir /code
 WORKDIR /code
 
-ENV every_seconds_from 1500
-ENV every_seconds_to 2100
+ENV every_seconds_from 3300
+ENV every_seconds_to 3900
 ENV service_name speedtest
 ENV instance_id 1
 
