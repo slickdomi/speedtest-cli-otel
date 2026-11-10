@@ -24,10 +24,12 @@ PINGS = 20
 # the first WARM_UP seconds out of the speed, while TCP ramps up
 CONNECTIONS = 8
 WARM_UP = 1
-# per request, well within the 250 MB down and 50 MB up Cloudflare's library uses
-DOWNLOAD_SIZE = 25 * 1000 * 1000
+# per request, the most Cloudflare's library asks for, 250 MB down and 50 MB up,
+# so a test takes few requests, which its rate limit may count: at 1 Gbit/s,
+# about one per connection down and two up. Transfers stop when time is up
+DOWNLOAD_SIZE = 250 * 1000 * 1000
 CHUNK = 256 * 1024
-UPLOAD_SIZE = 100 * CHUNK
+UPLOAD_SIZE = 50 * 1000 * 1000 // CHUNK * CHUNK
 # how long to stop testing after Cloudflare rate limits a test without saying
 RATE_LIMIT_PAUSE = 60 * 60
 

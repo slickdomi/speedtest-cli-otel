@@ -90,7 +90,7 @@ SPEEDTEST_DURATION 8
 
 Results have speedtest-cli's fields, and add `jitter`. Latency is how long opening a TCP connection to Cloudflare takes, because Cloudflare's speed test can take over a second to answer a request. Its upload endpoint can also be slower than a fast connection, around 80 Mbit/s per connection in testing, so its upload numbers can come out lower than other engines'.
 
-Cloudflare rate limits its speed test too: a handful of tests within a quarter of an hour got turned away for an hour. When that happens, it's reported as the error, and the service stops using Cloudflare for as long as Cloudflare asks. Once an hour stays well under it.
+Cloudflare rate limits its speed test too: a handful of tests within a quarter of an hour got turned away for an hour. Every device sharing your public IP address counts towards it, and so does every restart of the service, which tests right away with the first engine listed. When that happens, it's reported as the error, and the service stops using Cloudflare for as long as Cloudflare asks. A test makes about 25 requests on a gigabit connection, fewer than a test on speed.cloudflare.com, so once an hour stays well under it.
 
 ## Development
 
