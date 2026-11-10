@@ -39,6 +39,11 @@ Docker container available at https://hub.docker.com/r/slickdomi/speedtest-cli-o
 
 ## Choosing the speedtest
 
+Pick how the service tests with `SPEEDTEST_ENGINE`: `speedtest-cli`, `ookla` or `cloudflare`, described below. Without it, the service uses Ookla's CLI when you accepted its license, and speedtest-cli otherwise. List several, comma-separated, to have them take turns, one per run. Testing against different networks shows whether your connection is slower to some of them, or at some times of day, than to others; every result says which engine it's from as `engine`.
+```
+SPEEDTEST_ENGINE cloudflare,ookla
+```
+
 ### speedtest-cli (default)
 
 [speedtest-cli](https://github.com/sivel/speedtest-cli) is open source and part of the image, but it has been archived since 2021 and works with fewer and fewer servers. When several servers are pinned, the one with the lowest latency is used. List ids with `docker run --rm --entrypoint speedtest-cli slickdomi/speedtest-cli-otel:latest --secure --list`, on the same network as the service. Only the ~10 servers that list shows can be pinned, any other id makes speedtest-cli fail with `No matched servers`.
@@ -67,13 +72,29 @@ Runs rotate over several servers, so the results don't all come from the same on
 SPEEDTEST_ROTATE true
 ```
 
-Ookla limits how often the CLI may run from one public IP address. The limit isn't published, and it seems to have tightened around 30 October 2026: since then, people report Ookla turning tests away when they run every 20 minutes, but not every 30 minutes. Every device sharing your public IP address counts towards it, and so does every restart of the service, which tests right away. Listing servers is limited too. When Ookla turns the CLI away with `Limit reached: Too many requests received`, that's reported as the error, no other server is tried, and the service stops testing for 2 hours, because trying again sooner seems to make the limit last longer. Running once an hour, the default, stays under it; don't go below 30 minutes between runs, and leave more room when other devices on your connection run speedtests too.
+Ookla limits how often the CLI may run from one public IP address. The limit isn't published, and it seems to have tightened around 30 October 2026: since then, people report Ookla turning tests away when they run every 20 minutes, but not every 30 minutes. Every device sharing your public IP address counts towards it, and so does every restart of the service, which tests right away. Listing servers is limited too. When Ookla turns the CLI away with `Limit reached: Too many requests received`, that's reported as the error, no other server is tried, and the service stops using Ookla's CLI for 2 hours, because trying again sooner seems to make the limit last longer. Running once an hour, the default, stays under it; don't go below 30 minutes between runs, and leave more room when other devices on your connection run speedtests too.
 
 Results are converted to speedtest-cli's fields, so the dashboard works with both, and add `jitter` and `packet_loss`. The network interface details Ookla reports, which include local and public IP and MAC addresses, aren't sent.
 
+### Cloudflare
+
+The service can also test against [Cloudflare's speed test](https://speed.cloudflare.com), using the same endpoints as Cloudflare's own [speed test library](https://github.com/cloudflare/speedtest). It needs nothing installed, and unlike Ookla's servers, which are mostly run by internet providers, Cloudflare's network is independent of yours. Requests go to whichever Cloudflare data center your provider routes you to, and results name it as the server, e.g. `BRU` for Brussels. Unlike Cloudflare's library, the service doesn't send the results to Cloudflare.
+```
+SPEEDTEST_ENGINE cloudflare
+```
+
+Download and upload each run over 8 connections at once, for 8 seconds each, leaving the first second out of the speed while the connections ramp up. On a gigabit connection, a test transfers about 1.7 GB. A shorter test uses less data, but measures less accurately:
+```
+SPEEDTEST_DURATION 8
+```
+
+Results have speedtest-cli's fields, and add `jitter`. Latency is how long opening a TCP connection to Cloudflare takes, because Cloudflare's speed test can take over a second to answer a request. Its upload endpoint can also be slower than a fast connection, around 80 Mbit/s per connection in testing, so its upload numbers can come out lower than other engines'.
+
+Cloudflare rate limits its speed test too: a handful of tests within a quarter of an hour got turned away for an hour. When that happens, it's reported as the error, and the service stops using Cloudflare for as long as Cloudflare asks. Once an hour stays well under it.
+
 ## Development
 
-Dependencies are pinned in `requirements.txt` and bumped by Dependabot, except Ookla's CLI, whose version and checksums are in `src/ookla.py`. `tests/smoke.py` runs the service inside the image against fake speedtest binaries and a fake OpenTelemetry collector, and CI runs it for every platform before pushing. To run it locally:
+Dependencies are pinned in `requirements.txt` and bumped by Dependabot, except Ookla's CLI, whose version and checksums are in `src/ookla.py`. `tests/smoke.py` runs the service inside the image against fake speedtest binaries, a fake Cloudflare and a fake OpenTelemetry collector, and CI runs it for every platform before pushing. To run it locally:
 ```
 docker build --target test .
 ```

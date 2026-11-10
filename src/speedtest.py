@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import itertools
 import schedule
@@ -6,6 +7,7 @@ import time
 import datetime
 import subprocess
 
+import cloudflare
 import ookla
 from otel import send_logs, send_error
 
@@ -54,39 +56,44 @@ def run_speedtest_cli():
         return None
     return result
 
+def rotating():
+    # on unless turned off, so the results don't all come from the same server
+    return (os.environ.get("SPEEDTEST_ROTATE") or "true").lower() != "false"
+
 # counts runs that rotate servers with SPEEDTEST_ROTATE
 rotations = itertools.count()
-# time.monotonic() until which runs are skipped, after Ookla rate limited one
-paused_until = 0
 
-def pause():
-    """Skips the runs during the next RATE_LIMIT_PAUSE, returns that for the error."""
-    global paused_until
-    paused_until = time.monotonic() + ookla.RATE_LIMIT_PAUSE
-    return f"pausing for {ookla.RATE_LIMIT_PAUSE // 60} minutes"
+def rotated(servers):
+    # each run starts one server further, and falls back on the ones after it
+    if not servers:
+        return servers
+    start = next(rotations) % len(servers)
+    return servers[start:] + servers[:start]
+
+# engine -> time.monotonic() until which its runs are skipped, after it was rate limited
+paused_until = {}
+
+def pause(engine, seconds):
+    """Skips the engine's runs for that many seconds, returns that for the error."""
+    paused_until[engine] = time.monotonic() + seconds
+    return f"pausing for {seconds // 60} minutes"
 
 def run_ookla():
     """Returns Ookla's result in speedtest-cli's format, or None after reporting why there isn't one."""
-    if time.monotonic() < paused_until:
-        print("Skipping, Ookla rate limited the speedtest less than", ookla.RATE_LIMIT_PAUSE // 60, "minutes ago")
-        return None
-    # on unless turned off, so the results don't all come from the same server
-    rotate = (os.environ.get("SPEEDTEST_ROTATE") or "true").lower() != "false"
+    rotate = rotating()
     try:
         ookla.install()
         servers = ookla.pick_servers(server_ids("SPEEDTEST_SERVER"), server_ids("SPEEDTEST_EXCLUDE"), rotate)
     except ookla.RateLimited as e:
-        send_error("Error setting up Ookla's speedtest", f"{e}; {pause()}")
+        send_error("Error setting up Ookla's speedtest", f"{e}; {pause('ookla', ookla.RATE_LIMIT_PAUSE)}")
         print("Ookla rate limited listing servers")
         return None
     except Exception as e:
         send_error("Error setting up Ookla's speedtest", e)
         print("Fail setting up Ookla's speedtest")
         return None
-    if rotate and servers:
-        # each run starts one server further, and falls back on the ones after it
-        start = next(rotations) % len(servers)
-        servers = servers[start:] + servers[:start]
+    if rotate:
+        servers = rotated(servers)
 
     failures = []
     for server in servers:
@@ -101,7 +108,7 @@ def run_ookla():
         failures.append(f"server {server}: {reason}" if server else reason)
         if speedtest.returncode == ookla.RATE_LIMITED:
             # the other servers would be turned away too, and each try counts against the limit
-            failures.append(pause())
+            failures.append(pause("ookla", ookla.RATE_LIMIT_PAUSE))
             break
 
     reason = "; ".join(failures) or "every server is excluded"
@@ -109,13 +116,50 @@ def run_ookla():
     print("speedtest failed:", reason)
     return None
 
-def run_speedtest():
-    print("Running speedtest ", datetime.datetime.now().isoformat())
+# seconds that download and upload each take with Cloudflare
+duration = int(os.environ.get("SPEEDTEST_DURATION") or 8)
+
+def run_cloudflare():
+    """Returns Cloudflare's result, or None after reporting why there isn't one."""
     try:
-        result = run_ookla() if ookla.accepted() else run_speedtest_cli()
+        return cloudflare.run(duration)
+    except cloudflare.RateLimited as e:
+        reason = f"{e}; {pause('cloudflare', e.retry_after)}"
+    except Exception as e:
+        reason = str(e)
+    send_error("Cloudflare's speedtest failed", reason)
+    print("Cloudflare's speedtest failed:", reason)
+    return None
+
+ENGINES = {"speedtest-cli": run_speedtest_cli, "ookla": run_ookla, "cloudflare": run_cloudflare}
+# comma-separated, taking turns; accepting Ookla's license used to be what
+# switched to its speedtest
+engines = [
+    engine.strip().lower()
+    for engine in (os.environ.get("SPEEDTEST_ENGINE") or ("ookla" if ookla.accepted() else "speedtest-cli")).split(",")
+    if engine.strip()
+]
+if not engines or any(engine not in ENGINES for engine in engines):
+    sys.exit(f"Unknown SPEEDTEST_ENGINE {os.environ.get('SPEEDTEST_ENGINE')!r}, use one or more of {', '.join(ENGINES)}")
+if "ookla" in engines and not ookla.accepted():
+    sys.exit("Set SPEEDTEST_ACCEPT_OOKLA_LICENSE=true to accept Ookla's license first, see the README")
+if "cloudflare" in engines and duration <= cloudflare.WARM_UP:
+    sys.exit(f"SPEEDTEST_DURATION has to be at least {cloudflare.WARM_UP + 1}")
+# counts runs, for the engines to take turns
+runs = itertools.count()
+
+def run_speedtest():
+    engine = engines[next(runs) % len(engines)]
+    if time.monotonic() < paused_until.get(engine, 0):
+        print("Skipping", engine, "for now, it rate limited the speedtest")
+        return
+    print("Running", engine, datetime.datetime.now().isoformat())
+    try:
+        result = ENGINES[engine]()
         if result is None:
             return
-        send_logs(result)
+        # so results can be told apart when engines take turns
+        send_logs({**result, "engine": engine})
     except Exception as e:
         print("Fail sending logs")
         send_error("Error parsing logs", e)
@@ -127,7 +171,7 @@ every_seconds_to = int(os.environ.get("every_seconds_to") or 3900)
 schedule.every(every_seconds_from).to(every_seconds_to).seconds.do(run_speedtest)
 
 print("Starting speedtest every", every_seconds_from, "to", every_seconds_to, "seconds")
-print("Using", "Ookla's speedtest" if ookla.accepted() else "speedtest-cli")
+print("Using", ", ".join(engines))
 run_speedtest()
 
 while True:

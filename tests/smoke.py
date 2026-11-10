@@ -16,7 +16,8 @@ import tarfile
 import tempfile
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest
 
@@ -145,6 +146,64 @@ collector = HTTPServer(("127.0.0.1", 0), Collector)
 threading.Thread(target=collector.serve_forever, daemon=True).start()
 
 
+# stands in for speed.cloudflare.com under /ok/, and rate limits under /limited/
+class FakeCloudflare(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    # (method, path) of every request
+    requests = []
+
+    def start(self, status, length, headers=()):
+        self.send_response(status)
+        self.send_header("Content-Length", str(length))
+        self.send_header("CF-Ray", "8a1b2c3d4e5f6789-BRU")
+        for header in headers:
+            self.send_header(*header)
+        self.end_headers()
+
+    def do_GET(self):
+        path, _, query = self.path.partition("?")
+        FakeCloudflare.requests.append(("GET", path))
+        if path.startswith("/limited/"):
+            return self.start(429, 0, [("Retry-After", "3600")])
+        if path != "/ok/__down":
+            return self.start(404, 0)
+        size = int(urllib.parse.parse_qs(query)["bytes"][0])
+        self.start(200, size)
+        chunk = bytes(256 * 1024)
+        while size:
+            self.wfile.write(chunk[:size])
+            size -= min(size, len(chunk))
+
+    def do_POST(self):
+        path = self.path.split("?")[0]
+        FakeCloudflare.requests.append(("POST", path))
+        if path != "/ok/__up":
+            return self.start(404, 0)
+        remaining = int(self.headers["Content-Length"])
+        while remaining:
+            data = self.rfile.read(min(remaining, 1024 * 1024))
+            if not data:
+                return
+            remaining -= len(data)
+        self.start(200, 0)
+
+    def log_message(self, *args):
+        pass
+
+
+class FakeCloudflareServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, *args):
+        # cloudflare.py hangs up mid-transfer when time is up
+        pass
+
+
+fake_cloudflare = FakeCloudflareServer(("127.0.0.1", 0), FakeCloudflare)
+threading.Thread(target=fake_cloudflare.serve_forever, daemon=True).start()
+FAKE_CLOUDFLARE = f"http://127.0.0.1:{fake_cloudflare.server_port}"
+
+
 def write_executable(path, content):
     with open(path, "w") as f:
         f.write(content)
@@ -233,7 +292,7 @@ def test_result_is_exported():
     expect(len(got) == 1, f"expected 1 log record, got {got}", log)
     resource, severity, body = got[0]
     expect(severity == "INFO", f"expected INFO, got {severity}", log)
-    expect(body == RESULT, f"exported body doesn't match the speedtest result: {body}", log)
+    expect(body == {**RESULT, "engine": "speedtest-cli"}, f"exported body doesn't match the speedtest result: {body}", log)
     expect(
         resource.get("service.name") == "speedtest-smoke"
         and resource.get("service.instance.id") == "smoke-1",
@@ -316,6 +375,7 @@ def test_ookla_result_is_converted():
                    "host": "ultraspeed1.proximus.be:8080"},
         "client": {"isp": "Proximus"},
         "share": "https://www.speedtest.net/result/c/c2be1152-bffe-4cd5-a40b-38d43f0bb6da",
+        "engine": "ookla",
     }
     expect(bodies == [("INFO", expected)], f"unexpected records: {bodies}", log)
     expect("Warning" not in log, "speedtest.py printed warnings", log)
@@ -408,7 +468,7 @@ def test_ookla_rate_limit_pauses():
         every_seconds_to="1",
     )
     expect(calls == [OOKLA + ["--server-id=59333"]], f"expected no more tries once rate limited, got calls {calls}", log)
-    expect("Skipping, Ookla rate limited" in log, "expected the next runs to be skipped", log)
+    expect("Skipping ookla" in log, "expected the next runs to be skipped", log)
     bodies = [(severity, body) for _, severity, body in got]
     expect(
         bodies == [("ERROR", "speedtest failed: server 59333: " + " ".join(LIMIT_REACHED.split())
@@ -430,7 +490,7 @@ def test_ookla_rate_limited_listing_pauses():
         every_seconds_to="1",
     )
     expect(calls == [OOKLA + ["--servers"]], f"expected no more tries once rate limited, got calls {calls}", log)
-    expect("Skipping, Ookla rate limited" in log, "expected the next runs to be skipped", log)
+    expect("Skipping ookla" in log, "expected the next runs to be skipped", log)
     bodies = [(severity, body) for _, severity, body in got]
     expect(
         bodies == [("ERROR", "Error setting up Ookla's speedtest: " + " ".join(LIMIT_REACHED.split())
@@ -438,6 +498,82 @@ def test_ookla_rate_limited_listing_pauses():
         f"expected one error with speedtest's message, got {bodies}",
         log,
     )
+
+
+CLOUDFLARE = {
+    "SPEEDTEST_ENGINE": "cloudflare",
+    "SPEEDTEST_CLOUDFLARE_URL": f"{FAKE_CLOUDFLARE}/ok",
+    "SPEEDTEST_DURATION": "2",
+}
+
+
+def test_cloudflare_result_is_exported():
+    FakeCloudflare.requests = []
+    got, _, log = run_speedtest({}, 1, **CLOUDFLARE)
+    bodies = [(severity, body) for _, severity, body in got]
+    expect(len(bodies) == 1 and bodies[0][0] == "INFO", f"expected one result, got {bodies}", log)
+    body = bodies[0][1]
+    expect(body["engine"] == "cloudflare", f"expected the engine in the result, got {body}", log)
+    expect(
+        body["server"] == {"id": "BRU", "sponsor": "Cloudflare", "name": "BRU",
+                           "host": f"127.0.0.1:{fake_cloudflare.server_port}"},
+        f"expected the data center from CF-Ray as the server, got {body['server']}",
+        log,
+    )
+    expect(
+        all(body[field] > 0 for field in ("download", "upload", "bytes_received", "bytes_sent")),
+        f"expected speeds and bytes, got {body}",
+        log,
+    )
+    expect(0 <= body["ping"] < 25, f"latency is too high for a server on localhost: {body['ping']} ms", log)
+    expect(body["jitter"] >= 0 and body["timestamp"].endswith("Z"), f"unexpected jitter or timestamp: {body}", log)
+    requests = set(FakeCloudflare.requests)
+    expect(requests == {("GET", "/ok/__down"), ("POST", "/ok/__up")}, f"unexpected requests: {requests}", log)
+
+
+def test_cloudflare_failure_is_exported():
+    got, _, log = run_speedtest({}, 1, **{**CLOUDFLARE, "SPEEDTEST_CLOUDFLARE_URL": f"{FAKE_CLOUDFLARE}/missing"})
+    bodies = [(severity, body) for _, severity, body in got]
+    expect(
+        bodies == [("ERROR", "Cloudflare's speedtest failed: HTTP 404 Not Found")],
+        f"expected one error with the reason, got {bodies}",
+        log,
+    )
+
+
+def test_cloudflare_rate_limit_pauses():
+    # runs every second, long enough for the scheduler to try again at least once
+    FakeCloudflare.requests = []
+    got, _, log = run_speedtest(
+        {},
+        1,
+        settle=3,
+        **{**CLOUDFLARE, "SPEEDTEST_CLOUDFLARE_URL": f"{FAKE_CLOUDFLARE}/limited"},
+        every_seconds_from="1",
+        every_seconds_to="1",
+    )
+    expect(FakeCloudflare.requests == [("GET", "/limited/__down")],
+           f"expected no more tries once rate limited, got requests {FakeCloudflare.requests}", log)
+    expect("Skipping cloudflare" in log, "expected the next runs to be skipped", log)
+    bodies = [(severity, body) for _, severity, body in got]
+    expect(
+        bodies == [("ERROR", "Cloudflare's speedtest failed: Cloudflare rate limited the test; pausing for 60 minutes")],
+        f"expected one error with the reason, got {bodies}",
+        log,
+    )
+
+
+def test_engines_take_turns():
+    got, _, log = run_speedtest(
+        {"*": respond(json.dumps(RESULT))},
+        2,
+        **{**CLOUDFLARE, "SPEEDTEST_ENGINE": "speedtest-cli, cloudflare"},
+        every_seconds_from="1",
+        every_seconds_to="1",
+    )
+    # more runs may follow while the test waits for stray records
+    engines = [body.get("engine") for _, _, body in got[:2]]
+    expect(engines == ["speedtest-cli", "cloudflare"], f"expected the engines to take turns, got {engines}", log)
 
 
 def test_ookla_install():
@@ -483,6 +619,10 @@ if __name__ == "__main__":
         test_ookla_nearby_servers_rotate,
         test_ookla_rate_limit_pauses,
         test_ookla_rate_limited_listing_pauses,
+        test_cloudflare_result_is_exported,
+        test_cloudflare_failure_is_exported,
+        test_cloudflare_rate_limit_pauses,
+        test_engines_take_turns,
         test_ookla_install,
     ):
         test()
