@@ -27,15 +27,20 @@ jobs:
           username: slickdomi
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # latest on main, 1.2.3 and 1.2 on v1.2.3 tags
+      # latest on main; 1.2.3, 1.2 and 1 on v1.2.3 tags. Version tags don't
+      # also get latest, as they would by default, so tagging an older commit
+      # can't take latest back to it
       - uses: docker/metadata-action@v6
         id: meta
         with:
           images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
 
       # runs tests/smoke.py inside the image, once per platform
       - name: Test

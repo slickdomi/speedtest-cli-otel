@@ -11,6 +11,8 @@ Get prebuilt docker image from dockerhub:
 docker run -e OTEL_EXPORTER_OTLP_ENDPOINT='http://192.168.0.2:4137/v1/logs' --name speedtest slickdomi/speedtest-cli-otel:latest
 ```
 
+`latest` follows the main branch. Releases are tagged with their version too: `1.2.3` is that release, and `1.2` and `1` are the newest release with that minor or major version, so pinning `1` gets fixes and new features, but nothing that breaks your setup. See the [tags on Docker Hub](https://hub.docker.com/r/slickdomi/speedtest-cli-otel/tags).
+
 Configure the service using the following environment variables:
 
 By default the service will run a speedtest about once an hour, every 55-65 minutes (3300-3900 seconds), and send the results to the OpenTelemetry collector.
@@ -74,6 +76,11 @@ Results are converted to speedtest-cli's fields, so the dashboard works with bot
 Dependencies are pinned in `requirements.txt` and bumped by Dependabot, except Ookla's CLI, whose version and checksums are in `src/ookla.py`. `tests/smoke.py` runs the service inside the image against fake speedtest binaries and a fake OpenTelemetry collector, and CI runs it for every platform before pushing. To run it locally:
 ```
 docker build --target test .
+```
+
+To release, tag a commit on main with its version and push the tag; CI then publishes the image under that version too. Bump the major version for changes that break existing setups, the minor version for new features and the patch version for fixes:
+```
+git tag v1.2.3 && git push origin v1.2.3
 ```
 
 ## License
